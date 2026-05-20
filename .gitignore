@@ -1,0 +1,15 @@
+# DAD workflow state (generated at runtime)
+workflows/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
