@@ -41,6 +41,7 @@ DAD_HOME = Path.home() / ".hermes" / "dad"
 WORKFLOWS_DIR = DAD_HOME / "workflows"
 HERMES_ENV = Path.home() / ".hermes" / ".env"
 HERMES_BIN = Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "hermes"
+MESH_BIN = Path.home() / ".local" / "bin" / "mesh"
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -127,6 +128,29 @@ def pid_alive(pid: int) -> bool:
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def mesh_publish(workflow_id: str, type_: str, content: str, tags: list, importance: int = 2):
+    """Best-effort publish to agentic-mesh. Silent on failure — never breaks DAD."""
+    if not MESH_BIN.exists():
+        return
+    env = {
+        **os.environ,
+        "MESH_AGENT_ID": f"dad-{workflow_id}",
+        "MESH_AGENT_NAME": f"DAD ({workflow_id})",
+        "MESH_RUNTIME": "dad-supervisor",
+    }
+    try:
+        subprocess.run(
+            [str(MESH_BIN), "publish",
+             "--type", type_,
+             "--content", content,
+             "--tags", ",".join(["dad", workflow_id, *tags]),
+             "--importance", str(importance)],
+            env=env, capture_output=True, text=True, timeout=10, check=False,
+        )
+    except Exception:
+        pass  # mesh is optional; DAD must not fail because of it
 
 
 # ── Workflow State ───────────────────────────────────────────────────────────
@@ -288,6 +312,11 @@ class Supervisor:
         )
         self.wf.log(f"worker spawned with PID {pid}")
         self._maybe_notify(f"🚀 *DAD Supervisor started*\nWorkflow: `{self.wf.wf_dir.name}`\nTask: {task_text[:200]}\nPID: `{pid}`")
+        mesh_publish(
+            self.wf.wf_dir.name, "log",
+            f"DAD started. Task: {task_text[:300]}",
+            tags=["start"], importance=2,
+        )
 
     def _supervise(self):
         """Main supervision loop — 2min, 12min, 30min tiers."""
@@ -452,6 +481,10 @@ class Supervisor:
 
         report = "\n".join(status_lines)
         self._maybe_notify(report)
+        mesh_publish(
+            self.wf.wf_dir.name, "log", report,
+            tags=["heartbeat"], importance=1,
+        )
 
     def _is_stalled(self) -> bool:
         """Detect if the worker is stalled (no real progress).
@@ -592,6 +625,11 @@ class Supervisor:
 
         self.wf.log(f"recovering worker — reason: {reason}")
         self._maybe_notify(f"🔄 *DAD: Restarting worker*\nWorkflow: `{self.wf.wf_dir.name}`\nReason: {reason}\nAttempt: {restarts + 1}/{self.max_restarts}")
+        mesh_publish(
+            self.wf.wf_dir.name, "finding",
+            f"Worker stalled — restarting (attempt {restarts + 1}/{self.max_restarts}). Reason: {reason}",
+            tags=["stall", "restart"], importance=3,
+        )
 
         # Kill old worker
         old_pid = self.wf.state.get("worker_pid")
@@ -666,10 +704,20 @@ class Supervisor:
             self.wf.update_field(status="completed_success")
             self._maybe_notify(f"✅ *DAD: Workflow completed*\nWorkflow: `{self.wf.wf_dir.name}`\nEvidence: {'✅ verified' if evidence_ok else '⚠️ partial'}\nOutput log: `{self.wf.output_log}`")
             self.wf.log("✅ workflow completed successfully")
+            mesh_publish(
+                self.wf.wf_dir.name, "finding",
+                f"Workflow completed successfully. Evidence verified. Task: {self.wf.state.get('task','')[:200]}",
+                tags=["complete", "success"], importance=3,
+            )
         else:
             self.wf.update_field(status="completed_unverified")
             self._maybe_notify(f"⚠️ *DAD: Workflow finished but unverified*\nWorkflow: `{self.wf.wf_dir.name}`\nSuccess signals: {'found' if success else 'none'}\nEvidence: {'✅ verified' if evidence_ok else '❌ insufficient'}")
             self.wf.log("⚠️ workflow completed but evidence insufficient")
+            mesh_publish(
+                self.wf.wf_dir.name, "finding",
+                f"Workflow finished but UNVERIFIED. Success signals: {'found' if success else 'none'}. Evidence: {'verified' if evidence_ok else 'insufficient'}.",
+                tags=["complete", "unverified"], importance=3,
+            )
 
     def _verify_evidence(self) -> bool:
         """Check if required evidence types are satisfied."""
